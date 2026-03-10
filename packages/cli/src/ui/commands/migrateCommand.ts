@@ -18,17 +18,21 @@ import { SettingScope } from '../../config/settings.js';
 
 import * as os from 'node:os';
 
-const cleanClaudeContent = (content: string) =>
-  content
+const cleanClaudeContent = (content: string): string => {
+  let cleaned = content
     .replace(/CLAUDE\.md/gi, 'GEMINI.md')
     .replace(/Claude Code/gi, 'Gemini CLI')
     .replace(/Claude/gi, 'Gemini')
-    // Ensure "## Gemini Added Memories" section exists for the SaveMemory tool
-    .replace(/## Claude Added Memories/gi, '## Gemini Added Memories')
-    .trimEnd() +
-  (content.toLowerCase().includes('## gemini added memories')
-    ? ''
-    : '\n\n## Gemini Added Memories\n');
+    .replace(/## Claude Added Memories/gi, '## Gemini Added Memories');
+
+  cleaned = cleaned.trimEnd();
+
+  if (!cleaned.toLowerCase().includes('## gemini added memories')) {
+    cleaned += '\n\n## Gemini Added Memories\n';
+  }
+
+  return cleaned;
+};
 
 interface ClaudeConfig {
   mcpServers?: Record<string, unknown>;
