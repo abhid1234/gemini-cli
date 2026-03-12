@@ -82,6 +82,7 @@ import {
   ChangeAuthRequestedError,
   ProjectIdRequiredError,
   CoreToolCallStatus,
+  generateSteeringAckMessage,
   buildUserSteeringHintPrompt,
   logBillingEvent,
   ApiKeyUpdatedEvent,
@@ -463,6 +464,16 @@ export const AppContainer = (props: AppContainerProps) => {
         }
       }
 
+      if (initializationResult.claudeCodeDetected && !resumedSessionData) {
+        historyManager.addItem(
+          {
+            type: MessageType.INFO,
+            text: "✨ Welcome to Gemini CLI! \n🔍 We noticed you've been using Claude Code in this project. \n\nWould you like to import your Claude Code environment to Gemini? (Use `/migrate claude` to start)",
+          },
+          Date.now(),
+        );
+      }
+
       // Fire-and-forget: generate summary for previous session in background
       generateSummary(config).catch((e) => {
         debugLogger.warn('Background summary generation failed:', e);
@@ -473,9 +484,11 @@ export const AppContainer = (props: AppContainerProps) => {
       disableMouseEvents();
 
       // Kill all background shells
-      for (const pid of backgroundShellsRef.current.keys()) {
-        ShellExecutionService.kill(pid);
-      }
+      await Promise.all(
+        Array.from(backgroundShellsRef.current.keys()).map((pid) =>
+          ShellExecutionService.kill(pid),
+        ),
+      );
 
       const ideClient = await IdeClient.getInstance();
       await ideClient.disconnect();
@@ -1220,8 +1233,15 @@ Logging in with Google... Restarting Gemini CLI to continue.
         return;
       }
 
+      // If cancelling (shouldRestorePrompt=false), never modify the buffer
+      // User is in control - preserve whatever text they typed, pasted, or restored
+      if (!shouldRestorePrompt) {
+        return;
+      }
+
+      // Restore the last message when shouldRestorePrompt=true
       const lastUserMessage = inputHistory.at(-1);
-      let textToSet = shouldRestorePrompt ? lastUserMessage || '' : '';
+      let textToSet = lastUserMessage || '';
 
       const queuedText = getQueuedMessagesText();
       if (queuedText) {
@@ -1229,7 +1249,7 @@ Logging in with Google... Restarting Gemini CLI to continue.
         clearQueue();
       }
 
-      if (textToSet || !shouldRestorePrompt) {
+      if (textToSet) {
         buffer.setText(textToSet);
       }
     },
@@ -1389,11 +1409,7 @@ Logging in with Google... Restarting Gemini CLI to continue.
   // Compute available terminal height based on controls measurement
   const availableTerminalHeight = Math.max(
     0,
-    terminalHeight -
-      controlsHeight -
-      staticExtraHeight -
-      2 -
-      backgroundShellHeight,
+    terminalHeight - controlsHeight - backgroundShellHeight - 1,
   );
 
   config.setShellExecutionConfig({
@@ -1464,9 +1480,9 @@ Logging in with Google... Restarting Gemini CLI to continue.
   }, []);
   const shouldShowIdePrompt = Boolean(
     currentIDE &&
-      !config.getIdeMode() &&
-      !settings.merged.ide.hasSeenNudge &&
-      !idePromptAnswered,
+    !config.getIdeMode() &&
+    !settings.merged.ide.hasSeenNudge &&
+    !idePromptAnswered,
   );
 
   const [showErrorDetails, setShowErrorDetails] = useState<boolean>(false);
@@ -1706,9 +1722,8 @@ Logging in with Google... Restarting Gemini CLI to continue.
       if (keyMatchers[Command.SHOW_ERROR_DETAILS](key)) {
         if (settings.merged.general.devtools) {
           void (async () => {
-            const { toggleDevToolsPanel } = await import(
-              '../utils/devtoolsService.js'
-            );
+            const { toggleDevToolsPanel } =
+              await import('../utils/devtoolsService.js');
             await toggleDevToolsPanel(
               config,
               showErrorDetails,
@@ -1859,7 +1874,18 @@ Logging in with Google... Restarting Gemini CLI to continue.
   useKeypress(handleGlobalKeypress, { isActive: true, priority: true });
 
   useKeypress(
-    () => {
+    (key: Key) => {
+      if (
+        keyMatchers[Command.SCROLL_UP](key) ||
+        keyMatchers[Command.SCROLL_DOWN](key) ||
+        keyMatchers[Command.PAGE_UP](key) ||
+        keyMatchers[Command.PAGE_DOWN](key) ||
+        keyMatchers[Command.SCROLL_HOME](key) ||
+        keyMatchers[Command.SCROLL_END](key)
+      ) {
+        return false;
+      }
+
       setCopyModeEnabled(false);
       enableMouseEvents();
       return true;
@@ -2086,6 +2112,15 @@ Logging in with Google... Restarting Gemini CLI to continue.
       return;
     }
 
+    void generateSteeringAckMessage(
+      config.getBaseLlmClient(),
+      pendingHint,
+    ).then((ackText) => {
+      historyManager.addItem({
+        type: MessageType.INFO,
+        text: ackText,
+      });
+    });
     void submitQuery([{ text: buildUserSteeringHintPrompt(pendingHint) }]);
   }, [
     config,
@@ -2183,6 +2218,7 @@ Logging in with Google... Restarting Gemini CLI to continue.
       loopDetectionConfirmationRequest,
       permissionConfirmationRequest,
       geminiMdFileCount,
+      claudeCodeDetected: initializationResult.claudeCodeDetected,
       streamingState,
       initError,
       pendingGeminiHistoryItems,
@@ -2311,6 +2347,7 @@ Logging in with Google... Restarting Gemini CLI to continue.
       loopDetectionConfirmationRequest,
       permissionConfirmationRequest,
       geminiMdFileCount,
+      initializationResult.claudeCodeDetected,
       streamingState,
       initError,
       pendingGeminiHistoryItems,

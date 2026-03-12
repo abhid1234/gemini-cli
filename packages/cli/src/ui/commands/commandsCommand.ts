@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2026 Google LLC
+ * Copyright 2025 Google LLC
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -10,72 +10,89 @@ import {
   type SlashCommandActionReturn,
   CommandKind,
 } from './types.js';
-import {
-  MessageType,
-  type HistoryItemError,
-  type HistoryItemInfo,
-} from '../types.js';
+
+/**
+ * Action for `/commands list`.
+ * Displays all currently registered slash commands.
+ */
+async function listAction(
+  context: CommandContext,
+): Promise<void | SlashCommandActionReturn> {
+  const commands = context.ui.slashCommands;
+  if (!commands || commands.length === 0) {
+    return {
+      type: 'message',
+      messageType: 'info',
+      content: 'No slash commands loaded.',
+    };
+  }
+
+  const list = commands
+    .map((cmd: SlashCommand) => `  - **/${cmd.name}**: ${cmd.description}`)
+    .join('\n');
+
+  return {
+    type: 'message',
+    messageType: 'info',
+    content: `Available Slash Commands:\n\n${list}`,
+  };
+}
 
 /**
  * Action for the default `/commands` invocation.
- * Displays a message prompting the user to use a subcommand.
  */
-async function listAction(
+async function defaultAction(
   _context: CommandContext,
   _args: string,
 ): Promise<void | SlashCommandActionReturn> {
   return {
     type: 'message',
     messageType: 'info',
-    content:
-      'Use "/commands reload" to reload custom command definitions from .toml files.',
+    content: 'Usage: /commands [list|reload]',
   };
 }
 
 /**
  * Action for `/commands reload`.
- * Triggers a full re-discovery and reload of all slash commands, including
- * user/project-level .toml files, MCP prompts, and extension commands.
  */
 async function reloadAction(
-  context: CommandContext,
+  _context: CommandContext,
 ): Promise<void | SlashCommandActionReturn> {
-  try {
-    context.ui.reloadCommands();
+  // TODO: Implement dynamic command reloading in this version
+  /*
+  appEvents.emit(AppEvent.ReloadRequested, {
+    scope: 'commands',
+  });
+  */
 
-    context.ui.addItem(
-      {
-        type: MessageType.INFO,
-        text: 'Custom commands reloaded successfully.',
-      } as HistoryItemInfo,
-      Date.now(),
-    );
-  } catch (error) {
-    context.ui.addItem(
-      {
-        type: MessageType.ERROR,
-        text: `Failed to reload commands: ${error instanceof Error ? error.message : String(error)}`,
-      } as HistoryItemError,
-      Date.now(),
-    );
-  }
+  return {
+    type: 'message',
+    messageType: 'info',
+    content: 'Reloading custom commands is not yet supported in this version.',
+  };
 }
 
 export const commandsCommand: SlashCommand = {
   name: 'commands',
-  description: 'Manage custom slash commands. Usage: /commands [reload]',
+  description: 'Manage custom slash commands. Usage: /commands [list|reload]',
   kind: CommandKind.BUILT_IN,
   autoExecute: false,
   subCommands: [
     {
+      name: 'list',
+      description: 'List all currently registered slash commands.',
+      kind: CommandKind.BUILT_IN,
+      autoExecute: true,
+      action: listAction,
+    },
+    {
       name: 'reload',
       altNames: ['refresh'],
-      description:
-        'Reload custom command definitions from .toml files. Usage: /commands reload',
+      description: 'Reload custom command definitions from .toml files.',
       kind: CommandKind.BUILT_IN,
       autoExecute: true,
       action: reloadAction,
     },
   ],
-  action: listAction,
+  action: defaultAction,
 };

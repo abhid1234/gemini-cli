@@ -13,7 +13,6 @@ import {
 } from '../ui/commands/types.js';
 import type { MessageActionReturn, Config } from '@google/gemini-cli-core';
 import {
-  isNightly,
   startupProfiler,
   getAdminErrorMessage,
   AuthType,
@@ -41,21 +40,19 @@ import { ideCommand } from '../ui/commands/ideCommand.js';
 import { initCommand } from '../ui/commands/initCommand.js';
 import { mcpCommand } from '../ui/commands/mcpCommand.js';
 import { memoryCommand } from '../ui/commands/memoryCommand.js';
+import { migrateCommand } from '../ui/commands/migrateCommand.js';
 import { modelCommand } from '../ui/commands/modelCommand.js';
 import { oncallCommand } from '../ui/commands/oncallCommand.js';
 import { permissionsCommand } from '../ui/commands/permissionsCommand.js';
 import { planCommand } from '../ui/commands/planCommand.js';
 import { policiesCommand } from '../ui/commands/policiesCommand.js';
 import { privacyCommand } from '../ui/commands/privacyCommand.js';
-import { profileCommand } from '../ui/commands/profileCommand.js';
-import { quitCommand } from '../ui/commands/quitCommand.js';
-import { restoreCommand } from '../ui/commands/restoreCommand.js';
-import { resumeCommand } from '../ui/commands/resumeCommand.js';
+import { settingsCommand } from '../ui/commands/settingsCommand.js';
+import { skillsCommand } from '../ui/commands/skillsCommand.js';
 import { statsCommand } from '../ui/commands/statsCommand.js';
 import { themeCommand } from '../ui/commands/themeCommand.js';
+import { thinkCommand } from '../ui/commands/thinkCommand.js';
 import { toolsCommand } from '../ui/commands/toolsCommand.js';
-import { skillsCommand } from '../ui/commands/skillsCommand.js';
-import { settingsCommand } from '../ui/commands/settingsCommand.js';
 import { shellsCommand } from '../ui/commands/shellsCommand.js';
 import { vimCommand } from '../ui/commands/vimCommand.js';
 import { setupGithubCommand } from '../ui/commands/setupGithubCommand.js';
@@ -79,7 +76,6 @@ export class BuiltinCommandLoader implements ICommandLoader {
   async loadCommands(_signal: AbortSignal): Promise<SlashCommand[]> {
     const handle = startupProfiler.start('load_builtin_commands');
 
-    const isNightlyBuild = await isNightly(process.cwd());
     const addDebugToChatResumeSubCommands = (
       subCommands: SlashCommand[] | undefined,
     ): SlashCommand[] | undefined => {
@@ -98,32 +94,38 @@ export class BuiltinCommandLoader implements ICommandLoader {
         };
       });
 
-      if (!isNightlyBuild) {
-        return withNestedCompatibility;
-      }
-
-      return withNestedCompatibility.some(
-        (cmd) => cmd.name === debugCommand.name,
-      )
-        ? withNestedCompatibility
-        : [
-            ...withNestedCompatibility,
-            { ...debugCommand, suggestionGroup: 'checkpoints' },
-          ];
+      return [...withNestedCompatibility, debugCommand];
     };
 
-    const chatResumeSubCommands = addDebugToChatResumeSubCommands(
-      chatCommand.subCommands,
-    );
+    const wrapWithAdminCheck = (command: SlashCommand): SlashCommand => {
+      const originalAction = command.action;
+      return {
+        ...command,
+        action: async (args: CommandContext) => {
+          const adminErrorMessage = getAdminErrorMessage(
+            this.config,
+            command.name,
+          );
+          if (adminErrorMessage) {
+            return {
+              type: 'message',
+              messageType: 'error',
+              content: adminErrorMessage,
+            } as MessageActionReturn;
+          }
+          return originalAction(args);
+        },
+      };
+    };
 
     const allDefinitions: Array<SlashCommand | null> = [
       aboutCommand,
-      ...(this.config?.isAgentsEnabled() ? [agentsCommand] : []),
+      agentsCommand,
       authCommand,
-      bugCommand,
+      wrapWithAdminCheck(bugCommand),
       {
         ...chatCommand,
-        subCommands: chatResumeSubCommands,
+        subCommands: addDebugToChatResumeSubCommands(chatCommand.subCommands),
       },
       clearCommand,
       commandsCommand,
@@ -133,97 +135,46 @@ export class BuiltinCommandLoader implements ICommandLoader {
       docsCommand,
       directoryCommand,
       editorCommand,
-      ...(this.config?.getExtensionsEnabled() === false
-        ? [
-            {
-              name: 'extensions',
-              description: 'Manage extensions',
-              kind: CommandKind.BUILT_IN,
-              autoExecute: false,
-              subCommands: [],
-              action: async (
-                _context: CommandContext,
-              ): Promise<MessageActionReturn> => ({
-                type: 'message',
-                messageType: 'error',
-                content: getAdminErrorMessage(
-                  'Extensions',
-                  this.config ?? undefined,
-                ),
-              }),
-            },
-          ]
-        : [extensionsCommand(this.config?.getEnableExtensionReloading())]),
-      helpCommand,
+      extensionsCommand,
       footerCommand,
+      helpCommand,
       shortcutsCommand,
-      ...(this.config?.getEnableHooksUI() ? [hooksCommand] : []),
       rewindCommand,
-      await ideCommand(),
+      hooksCommand,
+      ideCommand,
       initCommand,
-      ...(isNightlyBuild ? [oncallCommand] : []),
-      ...(this.config?.getMcpEnabled() === false
-        ? [
-            {
-              name: 'mcp',
-              description:
-                'Manage configured Model Context Protocol (MCP) servers',
-              kind: CommandKind.BUILT_IN,
-              autoExecute: false,
-              subCommands: [],
-              action: async (
-                _context: CommandContext,
-              ): Promise<MessageActionReturn> => ({
-                type: 'message',
-                messageType: 'error',
-                content: getAdminErrorMessage('MCP', this.config ?? undefined),
-              }),
-            },
-          ]
-        : [mcpCommand]),
+      isDevelopment()
+        ? {
+            ...mcpCommand,
+            subCommands: [
+              ...(mcpCommand.subCommands || []),
+              {
+                name: 'setup-github',
+                description: 'Configure GitHub MCP server',
+                kind: CommandKind.BUILT_IN,
+                autoExecute: true,
+                action: async (context: CommandContext) =>
+                  setupGithubCommand.action(context),
+              },
+            ],
+          }
+        : mcpCommand,
       memoryCommand,
+      migrateCommand,
       modelCommand,
+      oncallCommand,
       ...(this.config?.getFolderTrust() ? [permissionsCommand] : []),
       ...(this.config?.isPlanEnabled() ? [planCommand] : []),
       policiesCommand,
       privacyCommand,
-      ...(isDevelopment ? [profileCommand] : []),
-      quitCommand,
-      restoreCommand(this.config),
-      {
-        ...resumeCommand,
-        subCommands: addDebugToChatResumeSubCommands(resumeCommand.subCommands),
-      },
+      settingsCommand,
+      skillsCommand,
       statsCommand,
       themeCommand,
+      thinkCommand,
       toolsCommand,
-      ...(this.config?.isSkillsSupportEnabled()
-        ? this.config?.getSkillManager()?.isAdminEnabled() === false
-          ? [
-              {
-                name: 'skills',
-                description: 'Manage agent skills',
-                kind: CommandKind.BUILT_IN,
-                autoExecute: false,
-                subCommands: [],
-                action: async (
-                  _context: CommandContext,
-                ): Promise<MessageActionReturn> => ({
-                  type: 'message',
-                  messageType: 'error',
-                  content: getAdminErrorMessage(
-                    'Agent skills',
-                    this.config ?? undefined,
-                  ),
-                }),
-              },
-            ]
-          : [skillsCommand]
-        : []),
-      settingsCommand,
       shellsCommand,
       vimCommand,
-      setupGithubCommand,
       terminalSetupCommand,
       ...(this.config?.getContentGeneratorConfig()?.authType ===
       AuthType.LOGIN_WITH_GOOGLE

@@ -201,19 +201,33 @@ async function getGeminiMdFilePathsInternal(
   fileFilteringOptions: FileFilteringOptions,
   maxDirs: number,
 ): Promise<{ global: string[]; project: string[] }> {
-  const dirs = new Set<string>([
-    ...includeDirectoriesToReadGemini,
-    currentWorkingDirectory,
-  ]);
-
-  // Process directories in parallel with concurrency limit to prevent EMFILE errors
-  const CONCURRENT_LIMIT = 10;
-  const dirsArray = Array.from(dirs);
   const globalPaths = new Set<string>();
   const projectPaths = new Set<string>();
 
-  for (let i = 0; i < dirsArray.length; i += CONCURRENT_LIMIT) {
-    const batch = dirsArray.slice(i, i + CONCURRENT_LIMIT);
+  // 1. Scan from CWD (upward and downward)
+  if (currentWorkingDirectory) {
+    const result = await getGeminiMdFilePathsInternalForEachDir(
+      currentWorkingDirectory,
+      userHomePath,
+      fileService,
+      folderTrust,
+      fileFilteringOptions,
+      maxDirs,
+      true, // performUpwardScan
+    );
+    result.global.forEach((p) => globalPaths.add(p));
+    result.project.forEach((p) => projectPaths.add(p));
+  }
+
+  // 2. Scan from other included directories (downward only)
+  const otherDirs = includeDirectoriesToReadGemini.filter(
+    (d) => d !== currentWorkingDirectory,
+  );
+
+  // Process directories in parallel with concurrency limit
+  const CONCURRENT_LIMIT = 10;
+  for (let i = 0; i < otherDirs.length; i += CONCURRENT_LIMIT) {
+    const batch = otherDirs.slice(i, i + CONCURRENT_LIMIT);
     const batchPromises = batch.map((dir) =>
       getGeminiMdFilePathsInternalForEachDir(
         dir,
@@ -222,6 +236,7 @@ async function getGeminiMdFilePathsInternal(
         folderTrust,
         fileFilteringOptions,
         maxDirs,
+        false, // performUpwardScan
       ),
     );
 
@@ -231,11 +246,6 @@ async function getGeminiMdFilePathsInternal(
       if (result.status === 'fulfilled') {
         result.value.global.forEach((p) => globalPaths.add(p));
         result.value.project.forEach((p) => projectPaths.add(p));
-      } else {
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-        const error = result.reason;
-        const message = error instanceof Error ? error.message : String(error);
-        logger.error(`Error discovering files in directory: ${message}`);
       }
     }
   }
@@ -253,6 +263,7 @@ async function getGeminiMdFilePathsInternalForEachDir(
   folderTrust: boolean,
   fileFilteringOptions: FileFilteringOptions,
   maxDirs: number,
+  performUpwardScan: boolean,
 ): Promise<{ global: string[]; project: string[] }> {
   const globalPaths = new Set<string>();
   const projectPaths = new Set<string>();
@@ -296,36 +307,38 @@ async function getGeminiMdFilePathsInternalForEachDir(
       );
 
       const upwardPaths: string[] = [];
-      let currentDir = resolvedCwd;
-      const ultimateStopDir = projectRoot
-        ? normalizePath(path.dirname(projectRoot))
-        : normalizePath(path.dirname(resolvedHome));
+      if (performUpwardScan) {
+        let currentDir = resolvedCwd;
+        const ultimateStopDir = projectRoot
+          ? normalizePath(path.dirname(projectRoot))
+          : normalizePath(path.dirname(resolvedHome));
 
-      while (
-        currentDir &&
-        currentDir !== normalizePath(path.dirname(currentDir))
-      ) {
-        if (currentDir === globalGeminiDir) {
-          break;
-        }
-
-        const potentialPath = normalizePath(
-          path.join(currentDir, geminiMdFilename),
-        );
-        try {
-          await fs.access(potentialPath, fsSync.constants.R_OK);
-          if (potentialPath !== globalMemoryPath) {
-            upwardPaths.unshift(potentialPath);
+        while (
+          currentDir &&
+          currentDir !== normalizePath(path.dirname(currentDir))
+        ) {
+          if (currentDir === globalGeminiDir) {
+            break;
           }
-        } catch {
-          // Not found, continue.
-        }
 
-        if (currentDir === ultimateStopDir) {
-          break;
-        }
+          const potentialPath = normalizePath(
+            path.join(currentDir, geminiMdFilename),
+          );
+          try {
+            await fs.access(potentialPath, fsSync.constants.R_OK);
+            if (potentialPath !== globalMemoryPath) {
+              upwardPaths.unshift(potentialPath);
+            }
+          } catch {
+            // Not found, continue.
+          }
 
-        currentDir = normalizePath(path.dirname(currentDir));
+          if (currentDir === ultimateStopDir) {
+            break;
+          }
+
+          currentDir = normalizePath(path.dirname(currentDir));
+        }
       }
       upwardPaths.forEach((p) => projectPaths.add(p));
 
@@ -584,6 +597,7 @@ export interface LoadServerHierarchicalMemoryResponse {
   memoryContent: HierarchicalMemory;
   fileCount: number;
   filePaths: string[];
+  claudeCodeDetected: boolean;
 }
 
 /**
@@ -621,6 +635,33 @@ export async function loadServerHierarchicalMemory(
   // This is consistent with how MemoryTool already finds the global path.
   const userHomePath = homedir();
 
+  // Detect Claude Code artifacts (Step 1 of Migration UX)
+  let claudeCodeDetected = false;
+  if (currentWorkingDirectory) {
+    const geminiMdPath = path.join(currentWorkingDirectory, 'GEMINI.md');
+    let geminiMdExists = false;
+    try {
+      await fs.access(geminiMdPath, fsSync.constants.R_OK);
+      geminiMdExists = true;
+    } catch {
+      // GEMINI.md doesn't exist
+    }
+
+    if (!geminiMdExists) {
+      const claudeArtifacts = ['CLAUDE.md', '.claude.json'];
+      for (const artifact of claudeArtifacts) {
+        const artifactPath = path.join(currentWorkingDirectory, artifact);
+        try {
+          await fs.access(artifactPath, fsSync.constants.R_OK);
+          claudeCodeDetected = true;
+          break;
+        } catch {
+          // Not found, continue.
+        }
+      }
+    }
+  }
+
   // 1. SCATTER: Gather all paths
   const [discoveryResult, extensionPaths] = await Promise.all([
     getGeminiMdFilePathsInternal(
@@ -651,6 +692,7 @@ export async function loadServerHierarchicalMemory(
       memoryContent: { global: '', extension: '', project: '' },
       fileCount: 0,
       filePaths: [],
+      claudeCodeDetected,
     };
   }
 
@@ -667,6 +709,7 @@ export async function loadServerHierarchicalMemory(
       memoryContent: { global: '', extension: '', project: '' },
       fileCount: 0,
       filePaths: [],
+      claudeCodeDetected,
     };
   }
 
@@ -689,6 +732,7 @@ export async function loadServerHierarchicalMemory(
     memoryContent: hierarchicalMemory,
     fileCount: allContents.filter((c) => c.content !== null).length,
     filePaths: allFilePaths,
+    claudeCodeDetected,
   };
 }
 
@@ -722,6 +766,7 @@ export async function refreshServerHierarchicalMemory(config: Config) {
   config.setUserMemory(finalMemory);
   config.setGeminiMdFileCount(result.fileCount);
   config.setGeminiMdFilePaths(result.filePaths);
+  config.setClaudeCodeDetected(result.claudeCodeDetected);
   coreEvents.emit(CoreEvent.MemoryChanged, { fileCount: result.fileCount });
   return result;
 }

@@ -92,6 +92,7 @@ export interface CommandContext {
     removeComponent: () => void;
     toggleBackgroundShell: () => void;
     toggleShortcutsHelp: () => void;
+    slashCommands: readonly SlashCommand[] | undefined;
   };
   // Session-specific data
   session: {
@@ -182,6 +183,7 @@ export enum CommandKind {
   EXTENSION_FILE = 'extension-file',
   MCP_PROMPT = 'mcp-prompt',
   AGENT = 'agent',
+  SKILL = 'skill',
 }
 
 // The standardized contract for any command in the system.
