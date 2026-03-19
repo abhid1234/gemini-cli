@@ -47,6 +47,10 @@ import { permissionsCommand } from '../ui/commands/permissionsCommand.js';
 import { planCommand } from '../ui/commands/planCommand.js';
 import { policiesCommand } from '../ui/commands/policiesCommand.js';
 import { privacyCommand } from '../ui/commands/privacyCommand.js';
+import { profileCommand } from '../ui/commands/profileCommand.js';
+import { quitCommand } from '../ui/commands/quitCommand.js';
+import { restoreCommand } from '../ui/commands/restoreCommand.js';
+import { resumeCommand } from '../ui/commands/resumeCommand.js';
 import { settingsCommand } from '../ui/commands/settingsCommand.js';
 import { skillsCommand } from '../ui/commands/skillsCommand.js';
 import { statsCommand } from '../ui/commands/statsCommand.js';
@@ -143,7 +147,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       hooksCommand,
       ideCommand,
       initCommand,
-      isDevelopment()
+      isDevelopment
         ? {
             ...mcpCommand,
             subCommands: [
@@ -163,6 +167,13 @@ export class BuiltinCommandLoader implements ICommandLoader {
       migrateCommand,
       modelCommand,
       oncallCommand,
+      profileCommand,
+      quitCommand,
+      restoreCommand(this.config),
+      {
+        ...resumeCommand,
+        subCommands: addDebugToChatResumeSubCommands(resumeCommand.subCommands),
+      },
       ...(this.config?.getFolderTrust() ? [permissionsCommand] : []),
       ...(this.config?.isPlanEnabled() ? [planCommand] : []),
       policiesCommand,

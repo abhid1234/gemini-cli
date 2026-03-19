@@ -466,13 +466,27 @@ export const AppContainer = (props: AppContainerProps) => {
         }
       }
 
+      debugLogger.debug(
+        `[AppContainer] Initialization result: ${JSON.stringify({
+          ...initializationResult,
+          authError: !!initializationResult.authError,
+          accountSuspensionInfo: !!initializationResult.accountSuspensionInfo,
+          themeError: !!initializationResult.themeError,
+        })}`,
+      );
+
       if (initializationResult.claudeCodeDetected && !resumedSessionData) {
+        debugLogger.log('[AppContainer] Claude Code detected! Showing nudge.');
         historyManager.addItem(
           {
             type: MessageType.INFO,
             text: "✨ Welcome to Gemini CLI! \n🔍 We noticed you've been using Claude Code in this project. \n\nWould you like to import your Claude Code environment to Gemini? (Use `/migrate claude` to start)",
           },
           Date.now(),
+        );
+      } else {
+        debugLogger.debug(
+          `[AppContainer] Nudge skip logic: detected=${initializationResult.claudeCodeDetected}, resumed=${!!resumedSessionData}`,
         );
       }
 
@@ -1500,9 +1514,9 @@ Logging in with Google... Restarting Gemini CLI to continue.
   }, []);
   const shouldShowIdePrompt = Boolean(
     currentIDE &&
-    !config.getIdeMode() &&
-    !settings.merged.ide.hasSeenNudge &&
-    !idePromptAnswered,
+      !config.getIdeMode() &&
+      !settings.merged.ide.hasSeenNudge &&
+      !idePromptAnswered,
   );
 
   const [showErrorDetails, setShowErrorDetails] = useState<boolean>(false);
@@ -1742,8 +1756,9 @@ Logging in with Google... Restarting Gemini CLI to continue.
       if (keyMatchers[Command.SHOW_ERROR_DETAILS](key)) {
         if (settings.merged.general.devtools) {
           void (async () => {
-            const { toggleDevToolsPanel } =
-              await import('../utils/devtoolsService.js');
+            const { toggleDevToolsPanel } = await import(
+              '../utils/devtoolsService.js'
+            );
             await toggleDevToolsPanel(
               config,
               showErrorDetails,

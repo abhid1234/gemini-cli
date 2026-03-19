@@ -486,7 +486,8 @@ export async function loadCliConfig(
     workspaceDir: cwd,
     enabledExtensionOverrides: argv.extensions,
 
-    eventEmitter: coreEvents as EventEmitter<ExtensionEvents>,
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+    eventEmitter: coreEvents as unknown as EventEmitter<ExtensionEvents>,
     clientVersion: await getVersion(),
   });
   await extensionManager.loadExtensions();
@@ -512,24 +513,26 @@ export async function loadCliConfig(
   let filePaths: string[] = [];
   let claudeCodeDetected = false;
 
+  // Call memory discovery to load context and detect Claude artifacts
+  const discoveryResult = await loadServerHierarchicalMemory(
+    cwd,
+    settings.context?.loadMemoryFromIncludeDirectories || false
+      ? includeDirectories
+      : [],
+    fileService,
+    extensionManager,
+    trustedFolder,
+    memoryImportFormat,
+    memoryFileFiltering,
+    settings.context?.discoveryMaxDirs,
+  );
+
+  claudeCodeDetected = discoveryResult.claudeCodeDetected;
+
   if (!experimentalJitContext) {
-    // Call the (now wrapper) loadHierarchicalGeminiMemory which calls the server's version
-    const result = await loadServerHierarchicalMemory(
-      cwd,
-      settings.context?.loadMemoryFromIncludeDirectories || false
-        ? includeDirectories
-        : [],
-      fileService,
-      extensionManager,
-      trustedFolder,
-      memoryImportFormat,
-      memoryFileFiltering,
-      settings.context?.discoveryMaxDirs,
-    );
-    memoryContent = result.memoryContent;
-    fileCount = result.fileCount;
-    filePaths = result.filePaths;
-    claudeCodeDetected = result.claudeCodeDetected;
+    memoryContent = discoveryResult.memoryContent;
+    fileCount = discoveryResult.fileCount;
+    filePaths = discoveryResult.filePaths;
   }
 
   const question = argv.promptInteractive || argv.prompt || '';

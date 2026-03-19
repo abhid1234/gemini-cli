@@ -4,9 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+/* eslint-disable */
+
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { exec } from 'node:child_process';
+import { promisify } from 'node:util';
 import { parse } from 'comment-json';
+
+const execAsync = promisify(exec);
+
 import type {
   SlashCommand,
   SlashCommandActionReturn,
@@ -20,18 +27,41 @@ import * as os from 'node:os';
 
 const cleanClaudeContent = (content: string): string => {
   let cleaned = content
+    // 1. Branding Scrub
     .replace(/CLAUDE\.md/gi, 'GEMINI.md')
     .replace(/Claude Code/gi, 'Gemini CLI')
     .replace(/Claude/gi, 'Gemini')
-    .replace(/## Claude Added Memories/gi, '## Gemini Added Memories');
+    .replace(/## Claude Added Memories/gi, '## Gemini Added Memories')
 
-  cleaned = cleaned.trimEnd();
+    // 2. Terminology Mapping (Gemini-specific patterns)
+    .replace(/\bsubagents\b/gi, 'parallel tool execution')
+    .replace(/\bsub-agents\b/gi, 'parallel tool execution')
+    .replace(/\bsubagent\b/gi, 'sub-agent')
 
-  if (!cleaned.toLowerCase().includes('## gemini added memories')) {
-    cleaned += '\n\n## Gemini Added Memories\n';
+    // 3. Remove Redundant Memory Tool instructions
+    .replace(/^.*update MEMORY\.md.*$/gim, '')
+    .replace(/^.*maintain MEMORY\.md.*$/gim, '')
+    .replace(/^.*MEMORY\.md should.*$/gim, '');
+
+  return cleaned.trim();
+};
+
+const addGeminiProTips = (content: string): string => {
+  let updated = content;
+  if (!updated.includes('Gemini CLI Optimization Guide')) {
+    updated += `
+
+## Gemini CLI Optimization Guide (Post-Migration)
+- **Modular Imports:** Use \`@path/to/file.md\` to keep this file lean and pull in external context dynamically.
+- **Execution Protocols:** Define workflows in XML-like tags (e.g., \`<PROTOCOL:PLAN>\`) to enforce step-by-step logic.
+- **Native Commands:** Refactor complex Markdown skills into \`.gemini/commands/*.toml\` for better argument parsing.
+- **Token Capacity:** You have 1M+ tokens. Feel free to include comprehensive project maps and dependency trees.`;
   }
 
-  return cleaned;
+  if (!updated.toLowerCase().includes('## gemini added memories')) {
+    updated += '\n\n## Gemini Added Memories\n';
+  }
+  return updated;
 };
 
 interface ClaudeConfig {
@@ -70,7 +100,9 @@ const migrateClaudeAction = async (
     mcpCount: 0,
     mcpNames: [] as string[],
     skillsCount: 0,
+    skillsNames: [] as string[],
     commandsCount: 0,
+    commandsNames: [] as string[],
     hooksCount: 0,
     scriptsUpdated: 0,
     policyGenerated: false,
@@ -78,7 +110,7 @@ const migrateClaudeAction = async (
 
   context.ui.addItem({
     type: MessageType.INFO,
-    text: '📦 **Migrating your workflow...**',
+    text: '> 📦 **Migrating your workflow...**',
   });
 
   // 1. Migrate CLAUDE.md to GEMINI.md (with @imports for skills)
@@ -87,29 +119,41 @@ const migrateClaudeAction = async (
 
   try {
     await fs.access(claudeMdPath);
-    const geminiMdContent = await fs.readFile(claudeMdPath, 'utf-8');
+    const claudeMdContent = await fs.readFile(claudeMdPath, 'utf-8');
 
     migratedAny = true;
 
     try {
       await fs.access(geminiMdPath);
       const existingContent = await fs.readFile(geminiMdPath, 'utf-8');
-      const cleaned = cleanClaudeContent(existingContent);
+      const cleaned = addGeminiProTips(cleanClaudeContent(existingContent));
       if (cleaned !== existingContent) {
         await fs.writeFile(geminiMdPath, cleaned);
         reports.push(
-          '✅ Cleaned up existing GEMINI.md from previous migration.',
+          'Optimized existing **GEMINI.md** with Gemini-specific patterns.',
         );
       } else {
-        reports.push('ℹ️ GEMINI.md already exists and is clean.');
+        reports.push('**GEMINI.md** already exists and is optimized.');
       }
-    } catch {
-      const cleanedContent = cleanClaudeContent(geminiMdContent);
-      await fs.writeFile(geminiMdPath, cleanedContent);
-      stats.mdCloned = true;
+    } catch (err: unknown) {
+       
+      const error = err as Error & { code?: string };
+      if (error.code === 'ENOENT') {
+        const cleanedContent = addGeminiProTips(
+          cleanClaudeContent(claudeMdContent),
+        );
+        await fs.writeFile(geminiMdPath, cleanedContent);
+        stats.mdCloned = true;
+      } else {
+        reports.push(`❌ Error accessing/writing GEMINI.md: ${error.message}`);
+      }
     }
-  } catch {
-    // CLAUDE.md doesn't exist
+  } catch (err: unknown) {
+     
+    const error = err as Error & { code?: string };
+    if (error.code !== 'ENOENT') {
+      reports.push(`❌ Error accessing CLAUDE.md: ${error.message}`);
+    }
   }
 
   // 1.5 Migrate .claudeignore to .geminiignore
@@ -121,7 +165,7 @@ const migrateClaudeAction = async (
     try {
       await fs.access(geminiIgnorePath);
       reports.push(
-        'ℹ️ .geminiignore already exists, skipping .claudeignore clone.',
+        '**.geminiignore** already exists, skipping **.claudeignore** clone.',
       );
     } catch {
       await fs.writeFile(geminiIgnorePath, cleanedIgnore);
@@ -132,7 +176,7 @@ const migrateClaudeAction = async (
     // .claudeignore doesn't exist
   }
 
-  // 2. Migrate .claude.json MCP servers (Workspace and Global)
+  // 2. Migrate MCP servers (Old .claude.json, Global config, and Nested Project settings)
   const migrateMcpServers = async (
     filePath: string,
     scope: SettingScope,
@@ -140,54 +184,119 @@ const migrateClaudeAction = async (
   ) => {
     try {
       const content = await fs.readFile(filePath, 'utf-8');
+       
       const claudeConfig = parse(content) as unknown as ClaudeConfig;
 
       if (claudeConfig.mcpServers) {
-        const currentMcpServers = (
-          scope === SettingScope.Workspace
-            ? settings.getWorkspace()?.mcpServers || {}
-            : settings.getGlobal()?.mcpServers || {}
-        ) as Record<string, unknown>;
+        // Get the full current settings for the specified scope
+         
+        const settingsFile = settings.forScope(scope as any);
+        const currentMcpServers = (settingsFile.settings.mcpServers ||
+          {}) as Record<string, unknown>;
+
         const newMcpServers = { ...currentMcpServers };
         let added = 0;
 
         for (const [name, serverConfig] of Object.entries(
           claudeConfig.mcpServers,
         )) {
+          if (!stats.mcpNames.includes(`${prefix}${name}`)) {
+            stats.mcpNames.push(`${prefix}${name}`);
+          }
           if (!newMcpServers[name]) {
             newMcpServers[name] = serverConfig;
             added++;
-            stats.mcpNames.push(`${prefix}${name}`);
           }
         }
-
         if (added > 0) {
-          settings.setValue(scope, 'mcpServers', newMcpServers);
-          stats.mcpCount += added;
+           
+          settings.setValue(scope as any, 'mcpServers', newMcpServers);
           migratedAny = true;
         }
       }
     } catch (error: unknown) {
       // Only log if it's an error other than "file not found"
-      if (
-        error instanceof Error &&
-        (error as Error & { code?: string }).code !== 'ENOENT'
-      ) {
-        reports.push(`❌ Error reading ${filePath}: ${error.message}`);
+       
+      const err = error as Error & { code?: string };
+      if (err.code !== 'ENOENT') {
+        reports.push(`❌ Error reading ${filePath}: ${err.message}`);
       }
     }
   };
 
+  const globalClaudePath = path.join(os.homedir(), '.claude.json');
+
+  // 2.1 First, try to find project-specific settings inside the global config
+  try {
+    const content = await fs.readFile(globalClaudePath, 'utf-8');
+     
+    const globalConfig = JSON.parse(content) as any;
+     
+    if (globalConfig.projects) {
+      // Find all projects in the config that are parents of (or equal to) the current directory
+       
+      const relevantProjectPaths = Object.keys(globalConfig.projects).filter(
+        (p) => cwd === p || cwd.startsWith(p + path.sep) || p === os.homedir(),
+      );
+
+      // Sort by length descending so we pick up the most specific settings first if there are overlaps
+      relevantProjectPaths.sort((a, b) => b.length - a.length);
+
+      for (const projectPath of relevantProjectPaths) {
+         
+        const projectData = globalConfig.projects[projectPath];
+         
+        if (
+          projectData.mcpServers &&
+           
+          Object.keys(projectData.mcpServers).length > 0
+        ) {
+          const isGlobal = projectPath === os.homedir();
+
+          const scope = isGlobal ? SettingScope.User : SettingScope.Workspace;
+           
+          const settingsFile = settings.forScope(scope as any);
+          const currentMcpServers = (settingsFile.settings.mcpServers ||
+            {}) as Record<string, unknown>;
+          const newMcpServers = { ...currentMcpServers };
+          let added = 0;
+
+           
+          for (const [name, serverConfig] of Object.entries(
+            projectData.mcpServers,
+          )) {
+            if (!stats.mcpNames.includes(name)) {
+              stats.mcpNames.push(name);
+            }
+            if (!newMcpServers[name]) {
+              newMcpServers[name] = serverConfig;
+              added++;
+            }
+          }
+
+          if (added > 0) {
+             
+            settings.setValue(scope as any, 'mcpServers', newMcpServers);
+            stats.mcpCount += added;
+            migratedAny = true;
+            reports.push(
+              `Found and migrated MCP settings from Claude project: **${projectPath}**`,
+            );
+          }
+        }
+      }
+    }
+  } catch {
+    // Global config not found or unparseable
+  }
+
+  // 2.2 Migrate legacy .claude.json and global servers
   await migrateMcpServers(
     path.join(cwd, '.claude.json'),
     SettingScope.Workspace,
     '',
   );
-  await migrateMcpServers(
-    path.join(os.homedir(), '.claude.json'),
-    SettingScope.User,
-    '(Global) ',
-  );
+  await migrateMcpServers(globalClaudePath, SettingScope.User, '(Global) ');
 
   // 3. Migrate Skills (.claude/skills/* -> .gemini/skills/*)
   const claudeSkillsDir = path.join(cwd, '.claude', 'skills');
@@ -211,6 +320,14 @@ const migrateClaudeAction = async (
         // Handle conflict with existing Gemini skills (like find-skills)
         if (existingSkillNames.has(skillName)) {
           skillName = `claude-${skillName}`;
+        }
+
+        if (!stats.skillsNames.includes(skillName)) {
+          stats.skillsNames.push(skillName);
+          stats.skillsCount++;
+        }
+        if (!migratedSkills.includes(skillName)) {
+          migratedSkills.push(skillName);
         }
 
         const targetSkillDir = path.join(geminiSkillsDir, skillName);
@@ -265,8 +382,6 @@ const migrateClaudeAction = async (
             );
           }
           await fs.writeFile(targetSkillFile, skillContent);
-          migratedSkills.push(skillName);
-          stats.skillsCount++;
         }
       }
 
@@ -283,7 +398,7 @@ const migrateClaudeAction = async (
               geminiMdPath,
               `${currentGeminiMd}\n\n# Migrated Skills\n${imports}\n`,
             );
-            reports.push('🔗 Added modular @imports to GEMINI.md');
+            reports.push('✅ Added modular **@imports** to **GEMINI.md**');
           }
         } catch {
           // GEMINI.md might not exist
@@ -291,11 +406,10 @@ const migrateClaudeAction = async (
       }
     }
   } catch (error: unknown) {
-    if (
-      error instanceof Error &&
-      (error as Error & { code?: string }).code !== 'ENOENT'
-    ) {
-      reports.push(`❌ Error migrating skills: ${error.message}`);
+     
+    const err = error as Error & { code?: string };
+    if (err.code !== 'ENOENT') {
+      reports.push(`❌ Error migrating skills: ${err.message}`);
     }
   }
 
@@ -312,6 +426,11 @@ const migrateClaudeAction = async (
 
       for (const file of mdFiles) {
         const commandName = path.basename(file, '.md');
+        if (!stats.commandsNames.includes(commandName)) {
+          stats.commandsCount++;
+          stats.commandsNames.push(commandName);
+        }
+
         const geminiCommandPath = path.join(
           geminiCommandsDir,
           `${commandName}.toml`,
@@ -336,7 +455,6 @@ const migrateClaudeAction = async (
 
         const tomlContent = `description = "Migrated from Claude Code: /${commandName}"\nprompt = """\n${translatedPrompt}\n"""\n`;
         await fs.writeFile(geminiCommandPath, tomlContent);
-        stats.commandsCount++;
       }
 
       if (stats.commandsCount > 0) {
@@ -344,11 +462,10 @@ const migrateClaudeAction = async (
       }
     }
   } catch (error: unknown) {
-    if (
-      error instanceof Error &&
-      (error as Error & { code?: string }).code !== 'ENOENT'
-    ) {
-      reports.push(`❌ Error migrating custom commands: ${error.message}`);
+     
+    const err = error as Error & { code?: string };
+    if (err.code !== 'ENOENT') {
+      reports.push(`❌ Error migrating custom commands: ${err.message}`);
     }
   }
 
@@ -356,10 +473,14 @@ const migrateClaudeAction = async (
   const claudeSettingsPath = path.join(cwd, '.claude', 'settings.json');
   try {
     const content = await fs.readFile(claudeSettingsPath, 'utf-8');
+     
     const claudeSettings = parse(content) as unknown as ClaudeConfig;
 
     if (claudeSettings.hooks) {
-      const currentHooks = settings.getWorkspace()?.hooks || {};
+      const workspaceSettings = settings.forScope(
+        SettingScope.Workspace,
+      ).settings;
+      const currentHooks = workspaceSettings.hooks || {};
       const newHooks = { ...currentHooks };
 
       const eventMap: Record<string, string> = {
@@ -377,6 +498,7 @@ const migrateClaudeAction = async (
         Glob: 'glob',
       };
 
+      let hooksAdded = 0;
       for (const [claudeEvent, claudeHookList] of Object.entries(
         claudeSettings.hooks,
       )) {
@@ -388,6 +510,7 @@ const migrateClaudeAction = async (
         }
 
         for (const entry of claudeHookList) {
+          stats.hooksCount++;
           let translatedMatcher = entry.matcher;
           for (const [claudeTool, geminiTool] of Object.entries(toolMap)) {
             translatedMatcher = translatedMatcher.replace(
@@ -404,10 +527,11 @@ const migrateClaudeAction = async (
             })),
           };
 
+           
           const exists = (
             (newHooks as Record<string, unknown[]>)[geminiEvent] || []
           ).some((existing: any) => {
-            // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+             
             return (
               existing.matcher === geminiEntry.matcher &&
               JSON.stringify(existing.hooks) ===
@@ -419,22 +543,21 @@ const migrateClaudeAction = async (
             (newHooks as Record<string, unknown[]>)[geminiEvent].push(
               geminiEntry,
             );
-            stats.hooksCount++;
+            hooksAdded++;
           }
         }
       }
 
-      if (stats.hooksCount > 0) {
+      if (hooksAdded > 0) {
         settings.setValue(SettingScope.Workspace, 'hooks', newHooks);
         migratedAny = true;
       }
     }
   } catch (error: unknown) {
-    if (
-      error instanceof Error &&
-      (error as Error & { code?: string }).code !== 'ENOENT'
-    ) {
-      reports.push(`❌ Error migrating hooks: ${error.message}`);
+     
+    const err = error as Error & { code?: string };
+    if (err.code !== 'ENOENT') {
+      reports.push(`❌ Error migrating hooks: ${err.message}`);
     }
   }
 
@@ -449,14 +572,17 @@ const migrateClaudeAction = async (
       const scriptPath = path.join(cwd, script);
       const content = await fs.readFile(scriptPath, 'utf-8');
 
-      if (content.includes('claude ')) {
+      if (
+        content.includes('claude ') ||
+        content.includes('gemini --output-format json ')
+      ) {
+        stats.scriptsUpdated++;
         const updatedContent = content.replace(
           /claude\s/g,
           'gemini --output-format json ',
         );
         if (updatedContent !== content) {
           await fs.writeFile(scriptPath, updatedContent);
-          stats.scriptsUpdated++;
         }
       }
     }
@@ -476,6 +602,7 @@ const migrateClaudeAction = async (
   );
   try {
     const content = await fs.readFile(claudeLocalSettingsPath, 'utf-8');
+     
     const localSettings = parse(content) as unknown as ClaudeConfig;
 
     if (
@@ -507,12 +634,11 @@ const migrateClaudeAction = async (
   }
 
   if (migratedAny) {
-    const mcpAdded = stats.mcpCount > 0;
-    if (mcpAdded) {
+    if (stats.mcpNames.length > 0) {
       const mcpClientManager = config.getMcpClientManager();
       if (mcpClientManager) {
         context.ui.addItem({
-          type: 'info',
+          type: MessageType.INFO,
           text: 'Restarting MCP servers to apply new configurations...',
         });
         await mcpClientManager.restart();
@@ -520,46 +646,104 @@ const migrateClaudeAction = async (
     }
   }
 
+  // 8. Self-Diagnostic Turn
+  let diagnosticResult = 'Skipped (no scripts found)';
+  let diagnosticPassed = true;
+
+  try {
+    const pkgJsonPath = path.join(cwd, 'package.json');
+     
+    const pkgJson = JSON.parse(await fs.readFile(pkgJsonPath, 'utf-8')) as any;
+     
+    const scripts = pkgJson.scripts || {};
+
+    // Broaden search for relevant diagnostic scripts
+     
+    const diagnosticCmd = scripts.typecheck
+      ? 'npm run typecheck'
+      :  
+        scripts['lint:ci']
+        ? 'npm run lint:ci'
+        :  
+          scripts.lint
+          ? 'npm run lint'
+          : null;
+
+    if (diagnosticCmd) {
+      context.ui.addItem({
+        type: MessageType.INFO,
+        text: `🔍 **Running Self-Diagnostic (${diagnosticCmd})...**`,
+      });
+
+      try {
+        await execAsync(diagnosticCmd, { cwd });
+        diagnosticResult = 'Passed ✅';
+      } catch (err: unknown) {
+        diagnosticPassed = false;
+         
+        const errorOutput = (
+          ((err as any).stdout || '') + ((err as any).stderr || '')
+        ).toString();
+        let hint = '';
+        if (
+          errorOutput.includes('command not found') ||
+          errorOutput.includes('node_modules missing')
+        ) {
+          hint =
+            '\n\n💡 Tip: It looks like project dependencies are missing. Try running pnpm install or npm install in your project directory.';
+        }
+         
+        diagnosticResult = `Failed ❌\n\n\`\`\`\n${
+          errorOutput || (err as any).message
+        }\n\`\`\`${hint}`;
+      }
+    }
+  } catch {
+    // Ignore errors reading package.json
+  }
+
   // Build the final summary message
   const duration = ((Date.now() - startTime) / 1000).toFixed(1);
-  const summaryLines: string[] = [];
 
-  if (stats.mdCloned) summaryLines.push('✅ Migrated CLAUDE.md into GEMINI.md');
-  if (stats.ignoreCloned)
-    summaryLines.push('✅ Migrated .claudeignore to .geminiignore');
-  if (stats.mcpCount > 0)
-    summaryLines.push(
-      `✅ Connected ${stats.mcpCount} MCP Server(s) (${stats.mcpNames.join(', ')})`,
-    );
-  if (stats.skillsCount > 0)
-    summaryLines.push(
-      `✅ Ported ${stats.skillsCount} skill(s) to .gemini/skills/`,
-    );
-  if (stats.commandsCount > 0)
-    summaryLines.push(
-      `✅ Ported ${stats.commandsCount} custom slash command(s)`,
-    );
-  if (stats.hooksCount > 0)
-    summaryLines.push(`✅ Migrated ${stats.hooksCount} automated hook(s)`);
-  if (stats.scriptsUpdated > 0)
-    summaryLines.push(
-      `✅ Updated ${stats.scriptsUpdated} script(s) with gemini --output-format json`,
-    );
-  if (stats.policyGenerated)
-    summaryLines.push(
-      '✅ Generated suggested policy in .gemini/suggested_policy.toml',
-    );
-
-  summaryLines.push(...reports);
+  const formattedSummary = [
+    stats.mdCloned && `- ✅ Migrated CLAUDE.md into GEMINI.md`,
+    stats.ignoreCloned && `- ✅ Migrated .claudeignore to .geminiignore`,
+    stats.mcpNames.length > 0 &&
+      `- ✅ Connected ${stats.mcpNames.length} MCP Server(s) (${stats.mcpNames.join(', ')})`,
+    stats.skillsCount > 0 &&
+      `- ✅ Ported ${stats.skillsCount} skill(s) to .gemini/skills/`,
+    stats.commandsCount > 0 &&
+      `- ✅ Ported ${stats.commandsCount} custom slash command(s)`,
+    stats.hooksCount > 0 &&
+      `- ✅ Migrated ${stats.hooksCount} automated hook(s)`,
+    stats.scriptsUpdated > 0 &&
+      `- ✅ Updated ${stats.scriptsUpdated} script(s) with gemini --output-format json`,
+    stats.policyGenerated &&
+      `- ✅ Generated suggested policy in .gemini/suggested_policy.toml`,
+    ...reports.map((r) => {
+      if (r.includes('@imports'))
+        return `- 🔗 Added modular @imports to GEMINI.md`;
+      if (r.includes('Optimized') || r.includes('exists')) return `- ✅ ${r}`;
+      return `- ${r}`;
+    }),
+    `- 🩺 **Self-Diagnostic:** ${diagnosticResult}`,
+  ]
+    .filter(Boolean)
+    .join('\n');
 
   const finalMessage = `
-${summaryLines.map((l) => `  - ${l}`).join('\n')}
+📦 Migrating your workflow...
+${formattedSummary}
 
-🚀 **Migration complete in ${duration}s.**
+🚀 Migration complete in ${duration}s.
 
-💡 **Note:** We migrated automated hooks to \`.gemini/settings.json\`. You will see a standard security warning when these hooks are detected—this is normal for project-level automation.
+${
+  !diagnosticPassed
+    ? `⚠️ Warning: The self-diagnostic found potential issues. Please review the output above to ensure no logic-critical strings were broken during replacement.\n\n`
+    : ''
+}💡 Note: We migrated automated hooks to .gemini/settings.json. You will see a standard security warning when these hooks are detected—this is normal for project-level automation.
 
-💡 **Quick Tip:** In Gemini CLI, typing \`/exit\` or pressing \`Ctrl+C\` quits instantly. No hanging. We promise. 😉`;
+💡 Quick Tip: In Gemini CLI, typing /exit or pressing Ctrl+C quits instantly. No hanging. We promise. 😉`;
 
   return {
     type: 'message',

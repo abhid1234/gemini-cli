@@ -193,7 +193,7 @@ async function findProjectRoot(startDir: string): Promise<string | null> {
 }
 
 async function getGeminiMdFilePathsInternal(
-  currentWorkingDirectory: string,
+  memorySearchCwd: string,
   includeDirectoriesToReadGemini: readonly string[],
   userHomePath: string,
   fileService: FileDiscoveryService,
@@ -205,9 +205,9 @@ async function getGeminiMdFilePathsInternal(
   const projectPaths = new Set<string>();
 
   // 1. Scan from CWD (upward and downward)
-  if (currentWorkingDirectory) {
+  if (memorySearchCwd) {
     const result = await getGeminiMdFilePathsInternalForEachDir(
-      currentWorkingDirectory,
+      memorySearchCwd,
       userHomePath,
       fileService,
       folderTrust,
@@ -221,7 +221,7 @@ async function getGeminiMdFilePathsInternal(
 
   // 2. Scan from other included directories (downward only)
   const otherDirs = includeDirectoriesToReadGemini.filter(
-    (d) => d !== currentWorkingDirectory,
+    (d) => d !== memorySearchCwd,
   );
 
   // Process directories in parallel with concurrency limit
@@ -621,14 +621,11 @@ export async function loadServerHierarchicalMemory(
   const realHome = normalizePath(await fs.realpath(path.resolve(homedir())));
   const isHomeDirectory = realCwd === realHome;
 
-  // If it is the home directory, pass an empty string to the core memory
-  // function to signal that it should skip the workspace search.
-  currentWorkingDirectory = isHomeDirectory ? '' : currentWorkingDirectory;
-
   debugLogger.debug(
     '[DEBUG] [MemoryDiscovery] Loading server hierarchical memory for CWD:',
-    currentWorkingDirectory,
+    realCwd,
     `(importFormat: ${importFormat})`,
+    `isHomeDirectory: ${isHomeDirectory}`,
   );
 
   // For the server, homedir() refers to the server process's home.
@@ -637,35 +634,64 @@ export async function loadServerHierarchicalMemory(
 
   // Detect Claude Code artifacts (Step 1 of Migration UX)
   let claudeCodeDetected = false;
-  if (currentWorkingDirectory) {
-    const geminiMdPath = path.join(currentWorkingDirectory, 'GEMINI.md');
-    let geminiMdExists = false;
+  if (realCwd) {
+    const geminiMdPath = path.join(realCwd, 'GEMINI.md');
+    let geminiMdNeedsOptimization = true;
     try {
       await fs.access(geminiMdPath, fsSync.constants.R_OK);
-      geminiMdExists = true;
+      const content = await fs.readFile(geminiMdPath, 'utf-8');
+      if (content.includes('Gemini CLI Optimization Guide')) {
+        geminiMdNeedsOptimization = false;
+      }
+      debugLogger.debug(
+        `[MemoryDiscovery] GEMINI.md found. Needs optimization: ${geminiMdNeedsOptimization}`,
+      );
     } catch {
-      // GEMINI.md doesn't exist
+      debugLogger.debug(
+        `[MemoryDiscovery] GEMINI.md not found at ${geminiMdPath}`,
+      );
     }
 
-    if (!geminiMdExists) {
+    if (geminiMdNeedsOptimization) {
       const claudeArtifacts = ['CLAUDE.md', '.claude.json'];
       for (const artifact of claudeArtifacts) {
-        const artifactPath = path.join(currentWorkingDirectory, artifact);
+        const artifactPath = path.join(realCwd, artifact);
         try {
           await fs.access(artifactPath, fsSync.constants.R_OK);
           claudeCodeDetected = true;
+          debugLogger.debug(
+            `[MemoryDiscovery] Claude artifact found! -> ${artifactPath}`,
+          );
           break;
         } catch {
-          // Not found, continue.
+          debugLogger.debug(`[MemoryDiscovery] No artifact at ${artifactPath}`);
+        }
+      }
+      if (!claudeCodeDetected) {
+        const claudeDir = path.join(realCwd, '.claude');
+        try {
+          await fs.access(claudeDir, fsSync.constants.R_OK);
+          claudeCodeDetected = true;
+          debugLogger.debug(
+            `[MemoryDiscovery] .claude directory found! -> ${claudeDir}`,
+          );
+        } catch {
+          debugLogger.debug(
+            `[MemoryDiscovery] No .claude directory at ${claudeDir}`,
+          );
         }
       }
     }
   }
 
+  // If it is the home directory, pass an empty string to the core memory
+  // function to signal that it should skip the workspace search.
+  const memorySearchCwd = isHomeDirectory ? '' : currentWorkingDirectory;
+
   // 1. SCATTER: Gather all paths
   const [discoveryResult, extensionPaths] = await Promise.all([
     getGeminiMdFilePathsInternal(
-      currentWorkingDirectory,
+      memorySearchCwd,
       includeDirectoriesToReadGemini,
       userHomePath,
       fileService,
